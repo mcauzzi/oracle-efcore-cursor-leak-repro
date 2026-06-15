@@ -116,9 +116,9 @@ for (int i = 1; i <= iterations; i++)
     }
 
     if (i % 25 == 0)
-        {
-            Console.WriteLine($"iter {i,4}: failed SaveChanges={failed,4}  open cursors on session={await CountCursorsAsync()}");
-        }
+    {
+        Console.WriteLine($"iter {i,4}: failed SaveChanges={failed,4}  open cursors on session={await CountCursorsAsync()}");
+    }
 }
 
 Console.WriteLine();

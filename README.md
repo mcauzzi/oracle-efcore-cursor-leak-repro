@@ -18,7 +18,7 @@ propagated back via `OPEN <refcursor> FOR SELECT :B1 FROM DUAL`), and a statemen
 
 - the ref cursors already opened by the **preceding** statements of the block are
   never received by the client and remain **open on the session indefinitely**;
-- they are NOT released by: transaction rollback, `ChangeTracker.Clear()`,
+- they are NOT released by: transaction rollback, 
   `DbContext.Dispose()`, `OracleConnection.PurgeStatementCache()`;
 - they ARE released only by closing the physical session (`OracleConnection.ClearPool`);
 - with pooling, the session is reused forever, so every failed batch adds cursors
