@@ -1,22 +1,32 @@
 // ============================================================================
 // Minimal repro: Oracle.EntityFrameworkCore orphans "SELECT :B1 FROM DUAL"
-// ref cursors when a statement AFTER THE FIRST in a SaveChanges batch fails.
+// ref cursors when a statement AFTER THE FIRST in a SaveChanges batch fails,
+// and the leaked cursors are NOT released when the connection is returned to
+// the pool - so a long-running service slowly saturates the reused session.
 //
 // Mechanism: with key/value generation active (ValueGeneratedOnAdd), the
 // provider batches DML into an anonymous PL/SQL block where each INSERT is
 // followed by an OPEN <refcursor> FOR SELECT <returned values> FROM DUAL.
 // If a later INSERT raises (e.g. ORA-12899), the block aborts AFTER the ref
 // cursors of the preceding statements were opened: the client never receives
-// their handles, so they stay open on the session forever. Rollback, context
-// dispose, ChangeTracker.Clear and OracleConnection.PurgeStatementCache do
-// NOT release them; only killing the session (ClearPool) does.
-// Long-running services with connection pooling eventually hit ORA-01000.
+// their handles, so they stay open on the session. Disposing the DbContext
+// (returning the connection to the pool), rollback and
+// OracleConnection.PurgeStatementCache do NOT release them; only killing the
+// physical session (ClearPool) does. With pooling the same session is reused,
+// so every failed batch adds cursors until it hits ORA-01000.
+//
+// This repro uses DEFAULT pooling (no connection-string changes): every
+// iteration creates a FRESH DbContext, fails SaveChanges, and disposes it - the
+// connection goes back to the pool and the next iteration gets the SAME
+// physical session (printed SID stays constant). The open-cursor count on that
+// session still climbs, which proves that returning the connection to the pool
+// does not release the leak. This is the production mechanism.
 //
 // Modes (2nd argument):
 //   1 (default) = HEAD + good DETAIL + failing DETAIL in the SAME SaveChanges
-//                 -> LEAK: open cursors grow on every failed SaveChanges
+//                 -> LEAK: cursors grow on the reused pooled session every time
 //   2 = same as 1 but MaxBatchSize(1)
-//                 -> NO leak: flat (failing statement has no predecessors)
+//                 -> NO leak: flat (the failing statement has no predecessors)
 //
 // NOTE on provider versions: on 8.23.x a HEAD insert before the failing DETAIL
 // is enough to leak. On 10.23.x the provider composes batches differently
@@ -69,56 +79,51 @@ await using (var setup = new TestContext())
         """);
 }
 
-// --- pin ONE physical session for the whole test, so the per-SID counter
-//     is deterministic (mirrors what a pooled connection does in a service).
-await using var ctx = new TestContext();
-await ctx.Database.OpenConnectionAsync();
-
 Console.WriteLine($"mode={mode}  MaxBatchSize={TestContext.MaxBatch}  iterations={iterations}");
-Console.WriteLine($"SID = {await ScalarAsync("SELECT SYS_CONTEXT('USERENV','SID') FROM DUAL")}");
-Console.WriteLine($"open cursors at start: {await CountCursorsAsync()}");
+Console.WriteLine($"start: {await MonitorAsync()}");
+Console.WriteLine("(default pooling, no connection-string changes: each iteration uses a fresh");
+Console.WriteLine(" DbContext that is disposed back to the pool, which hands the SAME session back)");
 Console.WriteLine();
 
 int failed = 0;
 var oraErrors = new Dictionary<int, int>();                     // distinct ORA code -> occurrences
 for (int i = 1; i <= iterations; i++)
 {
-    ctx.Heads.Add(new Head { Payload = "OK" });                 // statement #1: succeeds -> its ref cursor gets opened
-    ctx.Details.Add(new Detail { ShortCol = new string('X', 1) });
-    ctx.Details.Add(new Detail { ShortCol = new string('X', 50) });// ORA-12899: 50 chars > VARCHAR2(10)
-
-    try
+    // FRESH context every iteration: it is disposed at the end of the block,
+    // returning the connection to the pool
+    await using (var ctx = new TestContext())
     {
-        await ctx.SaveChangesAsync();
-    }
-    catch (DbUpdateException ex)
-    {
-        failed++;                                               // expected: every SaveChanges fails
+        ctx.Heads.Add(new Head { Payload = "OK" });             // statement #1: succeeds -> its ref cursor gets opened
+        ctx.Details.Add(new Detail { ShortCol = new string('X', 1) });
+        ctx.Details.Add(new Detail { ShortCol = new string('X', 50) });// ORA-12899: 50 chars > VARCHAR2(10)
 
-        // NOTE: DbUpdateException.Message is the generic EF text; the ORA code
-        // lives in the inner OracleException -> walk the chain.
-        OracleException? ora = ex.InnerException as OracleException;
-
-        int code = ora?.Number ?? 0;
-        oraErrors[code] = oraErrors.TryGetValue(code, out var c) ? c + 1 : 1;
-        if (oraErrors[code] == 1)                               // log every DISTINCT ORA error once
-            Console.WriteLine($"iter {i,4}: first ORA-{code:D5}: {ora?.Message.Split('\n')[0]}");
-
-        if (code == 1000)
+        try
         {
-            Console.WriteLine($"iter {i,4}: ORA-01000 maximum open cursors exceeded -> session saturated by the leak");
-            break;                                              // the session is unusable from here on
+            await ctx.SaveChangesAsync();
         }
-    }
-    finally
-    {
-        ctx.ChangeTracker.Clear();
-    }
+        catch (DbUpdateException ex)
+        {
+            failed++;                                           // expected: every SaveChanges fails
+
+            // NOTE: DbUpdateException.Message is the generic EF text; the ORA
+            // code lives in the inner OracleException -> walk the chain.
+            OracleException? ora = ex.InnerException as OracleException;
+
+            int code = ora?.Number ?? 0;
+            oraErrors[code] = oraErrors.TryGetValue(code, out var c) ? c + 1 : 1;
+            if (oraErrors[code] == 1)                           // log every DISTINCT ORA error once
+                Console.WriteLine($"iter {i,4}: first ORA-{code:D5}: {ora?.Message.Split('\n')[0]}");
+
+            if (code == 1000)
+            {
+                Console.WriteLine($"iter {i,4}: ORA-01000 maximum open cursors exceeded -> the pooled session is saturated even though the connection was returned to the pool after every iteration");
+                break;                                          // the pooled session is unusable from here on
+            }
+        }
+    } 
 
     if (i % 25 == 0)
-    {
-        Console.WriteLine($"iter {i,4}: failed SaveChanges={failed,4}  open cursors on session={await CountCursorsAsync()}");
-    }
+        Console.WriteLine($"iter {i,4}: failed SaveChanges={failed,4}  {await MonitorAsync()}");
 }
 
 Console.WriteLine();
@@ -127,35 +132,42 @@ foreach (var kv in oraErrors.OrderBy(k => k.Key))
     Console.WriteLine($"  ORA-{kv.Key:D5} x {kv.Value}");
 
 Console.WriteLine();
-Console.WriteLine("Top open cursors on this session (v$open_cursor):");
+Console.WriteLine("Top open cursors on the pooled session (v$open_cursor):");
 await DumpTopCursorsAsync();
 
 Console.WriteLine();
 Console.WriteLine("Expected:");
-Console.WriteLine("  mode 1 -> count grows ~ +1 per failed SaveChanges, top sql_text = 'SELECT :B1 FROM DUAL'");
+Console.WriteLine("  mode 1 -> count grows ~ +1 per failed SaveChanges on the SAME reused SID,");
+Console.WriteLine("            even though the connection is returned to the pool each iteration;");
+Console.WriteLine("            top sql_text = 'SELECT :B1 FROM DUAL'");
 Console.WriteLine("  mode 2 -> flat (MaxBatchSize=1: the failing statement has no predecessors)");
 
 // ---------------------------------------------------------------------------
 
-async Task<object?> ScalarAsync(string sql)
-{
-    var conn = ctx.Database.GetDbConnection();
-    await using var cmd = conn.CreateCommand();
-    cmd.CommandText = sql;
-    return await cmd.ExecuteScalarAsync();
-}
-
-async Task<string> CountCursorsAsync()
+// Each probe borrows a short-lived connection from the pool and releases it, so
+// it never pins a session: with default pooling and this single-threaded loop
+// the pool keeps handing back the same physical session (constant SID).
+async Task<string> MonitorAsync()
 {
     try
     {
-        var n = await ScalarAsync(
-            "SELECT COUNT(*) FROM v$open_cursor WHERE sid = SYS_CONTEXT('USERENV','SID')");
-        return Convert.ToInt32(n).ToString();
+        await using var probe = new TestContext();
+        var conn = probe.Database.GetDbConnection();
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT SYS_CONTEXT('USERENV','SID'),
+                   (SELECT COUNT(*) FROM v$open_cursor
+                    WHERE sid = SYS_CONTEXT('USERENV','SID'))
+            FROM DUAL
+            """;
+        await using var r = await cmd.ExecuteReaderAsync();
+        await r.ReadAsync();
+        return $"SID={r.GetValue(0)}  open cursors on session={r.GetValue(1)}";
     }
     catch (OracleException)
     {
-        return "n/a (no grant on V$OPEN_CURSOR)";
+        return "open cursors = n/a (no grant on V$OPEN_CURSOR)";
     }
 }
 
@@ -163,7 +175,9 @@ async Task DumpTopCursorsAsync()
 {
     try
     {
-        var conn = ctx.Database.GetDbConnection();
+        await using var probe = new TestContext();
+        var conn = probe.Database.GetDbConnection();
+        await conn.OpenAsync();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT cursor_type, sql_text, COUNT(*)

@@ -14,7 +14,7 @@ and a statement **after the first one in the block** raises (e.g. `ORA-12899: va
 
 - the ref cursors already opened by the **preceding** statements of the block are never received by the
   client and stay **open on the session indefinitely**;
-- they are **not** released by rollback, `ChangeTracker.Clear()`, `DbContext.Dispose()`, or
+- they are **not** released by rollback,  `DbContext.Dispose()`, or
   `OracleConnection.PurgeStatementCache()` — only by closing the physical session (`ClearPool`);
 - with pooling the session is reused indefinitely, so each failed batch adds cursors until the session
   reaches `open_cursors` → **`ORA-01000: maximum open cursors exceeded`**.
@@ -37,8 +37,10 @@ services, unrelated requests begin failing on a "good" connection.
 
 ### Reproduction
 
-Minimal, self-contained repro (two throw-away tables, one pinned session, per-SID cursor counting via
-`v$open_cursor`). Full details, run modes, and expected output in the README:
+Minimal, self-contained repro using **default pooling** (no connection-string changes): each iteration uses a
+**fresh `DbContext`** whose connection is **returned to the pool** after the failed `SaveChanges`; the pool
+hands the **same physical session** back (constant `SID`), and the open-cursor count on it keeps climbing — so
+returning the connection to the pool does **not** release the leak. Full details and expected output in the README:
 
 https://github.com/mcauzzi/oracle-efcore-cursor-leak-repro
 

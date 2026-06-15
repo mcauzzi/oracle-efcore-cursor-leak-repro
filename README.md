@@ -53,9 +53,14 @@ dotnet run -- "User Id=...;Password=...;Data Source=..." 2 200   # mode 2: flat 
 ```
 
 The program creates two throw-away tables (`CURSOR_LEAK_HEAD`, `CURSOR_LEAK_DETAIL`,
-the latter with a `VARCHAR2(10)` column), pins one physical session, and on every
-iteration saves a batch where the DETAIL insert fails with `ORA-12899` (50 chars
-into `VARCHAR2(10)`).
+the latter with a `VARCHAR2(10)` column). On every iteration it creates a **fresh
+`DbContext`**, saves a batch where the DETAIL insert fails with `ORA-12899` (50 chars
+into `VARCHAR2(10)`), and disposes the context so the connection is **returned to the
+pool**. With **default pooling** (no connection-string changes) the pool hands the
+**same physical session** back every iteration — the printed `SID` stays constant — so
+the leaked cursors accumulate on it. This proves the leak **survives returning the
+connection to the pool**: it is the realistic mechanism for a long-running service,
+not an artefact of holding one connection open.
 
 | Mode | SaveChanges content | Failing stmt position | Result |
 |------|--------------------|----------------------|--------|
