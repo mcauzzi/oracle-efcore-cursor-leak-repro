@@ -47,7 +47,6 @@ would otherwise succeed, which is how the bug surfaces in production services.
 ## How to run
 
 ```bash
-cd CursorLeakRepro
 dotnet run -- "User Id=...;Password=...;Data Source=..." 1 200   # mode 1: LEAK
 dotnet run -- "User Id=...;Password=...;Data Source=..." 2 200   # mode 2: flat (MaxBatchSize=1)
 ```
