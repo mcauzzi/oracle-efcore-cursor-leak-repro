@@ -80,7 +80,8 @@ DROP TABLE CURSOR_LEAK_DETAIL PURGE;
   (to test the 8.x line: set `<TargetFramework>net8.0</TargetFramework>` and
   `Oracle.EntityFrameworkCore` 8.23.90 in the csproj)
 - Microsoft.EntityFrameworkCore 10.x / .NET 10 (also 8.x / .NET 8)
-- Oracle Database <fill in version> (`SELECT banner_full FROM v$version`)
+- Oracle Database Oracle Database 21c Express Edition Release 21.0.0.0.0 - Production
+Version 21.3.0.0.0
 - Default ODP.NET pooling and statement caching (no custom connection string params)
 
 ## Expected behavior
