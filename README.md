@@ -49,8 +49,7 @@ would otherwise succeed, which is how the bug surfaces in production services.
 ```bash
 cd CursorLeakRepro
 dotnet run -- "User Id=...;Password=...;Data Source=..." 1 200   # mode 1: LEAK
-dotnet run -- "User Id=...;Password=...;Data Source=..." 2 200   # mode 2: flat (control)
-dotnet run -- "User Id=...;Password=...;Data Source=..." 3 200   # mode 3: flat (MaxBatchSize=1)
+dotnet run -- "User Id=...;Password=...;Data Source=..." 2 200   # mode 2: flat (MaxBatchSize=1)
 ```
 
 The program creates two throw-away tables (`CURSOR_LEAK_HEAD`, `CURSOR_LEAK_DETAIL`,
@@ -61,8 +60,7 @@ into `VARCHAR2(10)`).
 | Mode | SaveChanges content | Failing stmt position | Result |
 |------|--------------------|----------------------|--------|
 | 1 | HEAD (ok) + DETAIL (ok) + DETAIL (fails) | after a successful stmt | **leaks on every iteration** |
-| 2 | DETAIL (fails) alone | 1st of the block | flat |
-| 3 | same as 1, `MaxBatchSize(1)` | always 1st of its block | flat |
+| 2 | same as 1, `MaxBatchSize(1)` | always 1st of its block | flat |
 
 Per-SID monitoring uses `v$open_cursor` (needs a grant); without it, mode 1 still
 demonstrates the bug by eventually crashing the session with `ORA-01000`.

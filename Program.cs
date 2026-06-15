@@ -15,9 +15,7 @@
 // Modes (2nd argument):
 //   1 (default) = HEAD + good DETAIL + failing DETAIL in the SAME SaveChanges
 //                 -> LEAK: open cursors grow on every failed SaveChanges
-//   2 = failing DETAIL insert alone (failing statement is FIRST in block)
-//                 -> NO leak: flat (proves the position-dependence)
-//   3 = same as 1 but MaxBatchSize(1)
+//   2 = same as 1 but MaxBatchSize(1)
 //                 -> NO leak: flat (failing statement has no predecessors)
 //
 // NOTE on provider versions: on 8.23.x a HEAD insert before the failing DETAIL
@@ -52,7 +50,7 @@ int mode = args.Length > 1 ? int.Parse(args[1]) : 1;
 int iterations = args.Length > 2 ? int.Parse(args[2]) : 200;
 
 TestContext.ConnString = connString;
-TestContext.MaxBatch = mode == 3 ? 1 : 10;
+TestContext.MaxBatch = mode == 2 ? 1 : 10;
 
 // --- setup: create the two test tables (ignore ORA-00955 = already exists)
 await using (var setup = new TestContext())
@@ -85,9 +83,7 @@ int failed = 0;
 var oraErrors = new Dictionary<int, int>();                     // distinct ORA code -> occurrences
 for (int i = 1; i <= iterations; i++)
 {
-    if (mode != 2)
-        ctx.Heads.Add(new Head { Payload = "OK" });             // statement #1: succeeds -> its ref cursor gets opened
-
+    ctx.Heads.Add(new Head { Payload = "OK" });                 // statement #1: succeeds -> its ref cursor gets opened
     ctx.Details.Add(new Detail { ShortCol = new string('X', 1) });
     ctx.Details.Add(new Detail { ShortCol = new string('X', 50) });// ORA-12899: 50 chars > VARCHAR2(10)
 
@@ -120,7 +116,9 @@ for (int i = 1; i <= iterations; i++)
     }
 
     if (i % 25 == 0)
-        Console.WriteLine($"iter {i,4}: failed SaveChanges={failed,4}  open cursors on session={await CountCursorsAsync()}");
+        {
+            Console.WriteLine($"iter {i,4}: failed SaveChanges={failed,4}  open cursors on session={await CountCursorsAsync()}");
+        }
 }
 
 Console.WriteLine();
@@ -135,8 +133,7 @@ await DumpTopCursorsAsync();
 Console.WriteLine();
 Console.WriteLine("Expected:");
 Console.WriteLine("  mode 1 -> count grows ~ +1 per failed SaveChanges, top sql_text = 'SELECT :B1 FROM DUAL'");
-Console.WriteLine("  mode 2 -> flat (failing statement is the FIRST of the block: no cursor opened yet)");
-Console.WriteLine("  mode 3 -> flat (MaxBatchSize=1: the failing statement has no predecessors)");
+Console.WriteLine("  mode 2 -> flat (MaxBatchSize=1: the failing statement has no predecessors)");
 
 // ---------------------------------------------------------------------------
 
